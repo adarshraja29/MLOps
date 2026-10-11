@@ -1,0 +1,156 @@
+name: Continuous Delivery Pipeline - Computational Linguistics MLOps
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_BACKEND: ghcr.io/${{ github.repository }}/backend
+  IMAGE_FRONTEND: ghcr.io/${{ github.repository }}/frontend
+
+jobs:
+  # ============================================================================
+  # Job 1: Linting, Unit Testing & Build Validation
+  # ============================================================================
+  lint-and-test:
+    name: Lint & Automated Tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.10
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+          cache: "pip"
+
+      - name: Install Python Quality & Test Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install flake8 pytest httpx pydantic psutil fastapi uvicorn
+
+      - name: Lint Python Codebase (flake8)
+        run: |
+          # Stop the build on syntax errors or undefined variables
+          flake8 backend/app --count --select=E9,F63,F7,F82 --show-source --statistics
+          # Complexity and style audit
+          flake8 backend/app --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
+
+      - name: Execute Backend Automated Tests
+        run: |
+          pytest backend/tests/ -v
+
+      - name: Set up Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: frontend/package.json
+
+      - name: Install Frontend Dependencies & Verify Build
+        run: |
+          cd frontend
+          npm ci || npm install
+          npm run build
+
+  # ============================================================================
+  # Job 2: Build & Push Slim Multi-stage Containers (GHCR with GHA Cache)
+  # ============================================================================
+  build-and-push:
+    name: Build & Push Docker Images
+    needs: lint-and-test
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Authenticate to GitHub Container Registry (GHCR)
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build & Push Backend Container (python:3.10-slim + CPU PyTorch)
+        uses: docker/build-push-action@v5
+        with:
+          context: ./backend
+          file: ./backend/Dockerfile
+          push: true
+          tags: |
+            ${{ env.IMAGE_BACKEND }}:latest
+            ${{ env.IMAGE_BACKEND }}:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build & Push Frontend Container (Nginx Alpine)
+        uses: docker/build-push-action@v5
+        with:
+          context: ./frontend
+          file: ./frontend/Dockerfile
+          push: true
+          tags: |
+            ${{ env.IMAGE_FRONTEND }}:latest
+            ${{ env.IMAGE_FRONTEND }}:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # ============================================================================
+  # Job 3: Kubernetes Continuous Delivery & Rolling Update
+  # ============================================================================
+  k8s-continuous-delivery:
+    name: Kubernetes Rolling Update
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Kustomize
+        uses: imranismail/setup-kustomize@v2
+
+      - name: Update Image Tags in Kustomize Manifests
+        run: |
+          cd k8s
+          # Update container images to match the newly pushed SHA
+          kustomize edit set image ghcr.io/adarsh/academic-summarizer-backend=${{ env.IMAGE_BACKEND }}:${{ github.sha }}
+          kustomize edit set image ghcr.io/adarsh/academic-summarizer-frontend=${{ env.IMAGE_FRONTEND }}:${{ github.sha }}
+          kustomize build .
+
+      - name: Deploy Rolling Update to Kubernetes Cluster
+        env:
+          KUBECONFIG_DATA: ${{ secrets.KUBECONFIG }}
+        run: |
+          if [ -n "$KUBECONFIG_DATA" ]; then
+            echo "Deploying to Kubernetes cluster..."
+            mkdir -p $HOME/.kube
+            echo "$KUBECONFIG_DATA" | base64 -d > $HOME/.kube/config
+            
+            # Apply updated manifests
+            kubectl apply -k k8s/
+            
+            # Verify rolling updates succeed without deadlocks or OOM crashes
+            echo "Monitoring zero-downtime rolling update rollout..."
+            kubectl rollout status deployment/academic-summarizer-backend --timeout=180s
+            kubectl rollout status deployment/academic-summarizer-frontend --timeout=60s
+            echo "Continuous Delivery deployment completed successfully!"
+          else
+            echo "Notice: KUBECONFIG secret not detected in repository. Performing manifest dry-run validation."
+            kubectl apply -k k8s/ --dry-run=client
+            echo "Kubernetes manifests syntax and resource limits validated successfully!"
+          fi

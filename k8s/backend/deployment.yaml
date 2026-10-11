@@ -1,0 +1,88 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: academic-summarizer-backend
+  labels:
+    app: academic-summarizer
+    component: backend
+    tier: api
+spec:
+  replicas: 1
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app: academic-summarizer
+      component: backend
+  template:
+    metadata:
+      labels:
+        app: academic-summarizer
+        component: backend
+        tier: api
+    spec:
+      containers:
+        - name: summarizer-api
+          image: ghcr.io/adarsh/academic-summarizer-backend:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8000
+              name: http
+          env:
+            - name: ENVIRONMENT
+              value: "production"
+            - name: DEBUG
+              value: "false"
+            - name: DEVICE
+              value: "cpu"
+            - name: FORCE_CPU
+              value: "true"
+            - name: MAX_WORKERS
+              value: "1"
+            - name: MAX_INPUT_CHARS
+              value: "50000"
+            - name: MAX_INPUT_TOKENS
+              value: "2048"
+            - name: MEMORY_THRESHOLD_MB
+              value: "2560.0"
+          # Strict Resource Limits to Prevent Cluster OOM Kills
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "1536Mi"
+            limits:
+              cpu: "2000m"
+              memory: "2560Mi"
+          # Startup probe gives the model warm-up time before liveness takes over
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 12  # Allows up to 60s for warm-up
+          # Readiness Probe: ensures traffic is only routed when healthy
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          # Liveness Probe: restarts pod if deadlocked
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 30
+            periodSeconds: 15
+            timeoutSeconds: 3
+            failureThreshold: 3
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: false

@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: frontend
+  labels:
+    app: academic-summarizer
+    component: frontend
+spec:
+  type: LoadBalancer
+  selector:
+    app: academic-summarizer
+    component: frontend
+  ports:
+    - name: http
+      port: 80
+      targetPort: 80
+      protocol: TCP

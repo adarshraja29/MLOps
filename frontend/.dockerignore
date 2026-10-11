@@ -1,0 +1,12 @@
+# Frontend Docker Ignore
+node_modules/
+dist/
+build/
+.git/
+.gitignore
+.dockerignore
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.DS_Store
+Thumbs.db
